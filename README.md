@@ -78,6 +78,12 @@ curl -X POST http://localhost:8000/api/demo/run
 | `POST` | `/api/plans/{plan_id}/outbound` | 方案确认后出库 |
 | `GET` | `/api/plans/{plan_id}/boundary-check` | 核对不跨批、区间连续完整、装量合法 |
 | `POST` | `/api/boundary/validate-container` | 校验手工容器是否跨批次 |
+| `POST` | `/api/label-sheets` | 按纸号登记 3 列 x 8 行的 A4 标签纸及可用格 |
+| `GET` | `/api/label-sheets`、`/{sheet_code}` | 查询标签纸的可用、空闲、占用和不可用格 |
+| `POST` | `/api/label-layouts` | 提交已确认方案的箱码，生成带版面号的可打印版面 |
+| `GET` | `/api/label-layouts`、`/{layout_no}` | 查询版面和逐格分配 |
+| `GET` | `/api/label-layouts/{layout_no}/print` | 打开可直接打印的 A4 HTML 页面 |
+| `POST` | `/api/label-layouts/{layout_no}/report` | 打印后按格分次回报结果 |
 | `POST` | `/api/demo/run` | 一键运行三个核心演示场景 |
 | `GET` | `/api/demo/guide` | 返回 `/docs` 手工演示步骤 |
 
@@ -209,7 +215,79 @@ generated --confirm--> confirmed --outbound--> outbound
 
 已出库记录作为历史事实保留；后续批次修改不会把历史出库记录改写成未出库。当前失效操作针对仍处于 `generated` / `confirmed` 的方案。
 
-## 7. 数据模型
+## 7. 箱签拼版
+
+库管手里可能只剩一张 A4 标签纸上的若干空格。该功能把不同分装单的箱签拼到同一张纸上打印，并逐格跟踪打印结果。
+
+### 7.1 纸张与格号
+
+- 标签纸按纸号登记，固定等分为 **3 列 x 8 行 = 24 格**。
+- 格号从 1 开始，按行优先编号：第 1 行是 1–3，第 2 行是 4–6，依此类推。
+- `available_cells` 只登记当前仍可用的格；省略表示整张 24 格都可用。
+- 同一纸号重复登记相同几何和可用格按幂等成功处理；内容不同返回 `409 LABEL_SHEET_EXISTS`。
+
+```http
+POST /api/label-sheets
+{"sheet_code": "A4-3x8-LEFT", "available_cells": [2, 5, 7]}
+```
+
+`GET /api/label-sheets/{sheet_code}` 返回每格状态：`free`（空闲）、`occupied`（被某版面占用）、`unavailable`（实体不可用）。
+
+### 7.2 拼版
+
+```http
+POST /api/label-layouts
+{
+  "sheet_code": "A4-3x8-LEFT",
+  "items": [
+    {"plan_id": 1, "box_codes": ["BOX-P1-001", "BOX-P1-002"]},
+    {"plan_id": 2, "box_codes": ["BOX-P2-001"]}
+  ]
+}
+```
+
+- 只接受**已确认**方案的箱码；未确认返回 `409 PLAN_NOT_CONFIRMED`，过期返回 `409 PLAN_EXPIRED`。
+- 箱码必须属于所声明的 `plan_id`，否则 `422 BOX_CODE_NOT_IN_PLAN`。
+- 按 `items` 顺序占入纸上升序的空闲格，返回 `layout_no`（如 `LBL-000001`）、`page`（8 行 x 3 列网格，未分配格为 `null`，原位留白）和 `printable_page` 文本预览。
+- 空闲格不足时返回 `422 LABEL_SHEET_CAPACITY_EXCEEDED`，**整版退回**：不创建版面，纸位和箱码都不占用。
+- 同一个格或箱码不能同时分给两版；已占用的箱码返回 `409 LABEL_BOX_CODE_IN_USE`。
+- 写入前用 `BEGIN IMMEDIATE` 加锁，避免并发拼版抢到同一格或同一箱码。
+
+`GET /api/label-layouts/{layout_no}/print` 返回可直接打印的 A4 HTML 页面。
+
+### 7.3 分次回报
+
+```http
+POST /api/label-layouts/LBL-000001/report
+{"items": [{"cell_no": 2, "box_code": "BOX-P1-001", "result": "printed"}]}
+```
+
+`result` 取值和占用语义：
+
+| 结果 | 格 | 箱码 |
+| --- | --- | --- |
+| `reserved`（未回报，默认） | 继续占用 | 继续占用 |
+| `printed` | 永久占用 | 永久占用 |
+| `blank` | **立即释放** | **立即释放** |
+| `damaged` | 继续占用 | **释放，可重排** |
+
+- 原样重报（同版同格同结果）返回首次结果，`idempotent=true`，不做改动。
+- 同版同格改报不同结果时整次拒绝：`409 LABEL_REPORT_CONFLICT`，本次所有项都不写入。
+- 回报中的 `box_code` 用于核对，必须与该格一致，否则 `422 LABEL_BOX_CODE_MISMATCH`。
+- 释放的格可立即给别的分装单拼版；释放的箱码可在别处重排，响应中 `reprinted=true` 提示这是补印。
+
+### 7.4 自测场景
+
+`/docs` 中可手工走完：
+
+1. 生成并确认两份方案，复制 `containers[].container_code` 作为箱码。
+2. 登记只剩 2、5、7 格的半张纸。
+3. 拼版两份方案，查看 `page` 中未分配格为 `null`。
+4. 打开 `/print` 页面打印。
+5. 分批回报：先报 2 格 `printed`，再报 5 格 `blank`。
+6. 再拼一版，把释放出来的第 5 格给另一份方案，`GET /api/label-sheets/{sheet_code}` 验证续用。
+
+## 8. 数据模型
 
 - `batches`：批次号、当前数量、单调递增 `revision`
 - `packing_plans`：方案状态、装箱参数、确认/出库/过期时间
@@ -217,13 +295,18 @@ generated --confirm--> confirmed --outbound--> outbound
 - `containers`：容器、唯一所属批次、装量和来源区间
 - `allocations`：细粒度来源区间分配
 - `outbound_records`：出库参考号、操作人、备注和时间
+- `label_sheets` / `label_sheet_cells`：按纸号登记的纸张和 24 个格的可用地
+- `label_layouts`：拼版版面号、纸张和创建时间
+- `label_placements`：每格的版面、方案、箱码和 `reserved`/`printed`/`blank`/`damaged` 状态
+  - 部分唯一索引 `uq_label_cell_active`：同一格在 `reserved/printed/damaged` 时只能属于一个版面；
+  - 部分唯一索引 `uq_label_box_active`：同一箱码在 `reserved/printed` 时只能属于一个版面。`blank`/`damaged` 后释放。
 
-## 8. 已完成的自测
+## 9. 已完成的自测
 
 在开发环境中已执行：
 
 ```text
-12 passed in ...
+27 passed in ...
 ```
 
 覆盖：
@@ -236,6 +319,13 @@ generated --confirm--> confirmed --outbound--> outbound
 - 未确认禁止出库、确认后出库；
 - 相同数量 PATCH 也使方案过期；
 - 数量修改后再恢复仍使替代方案过期；
-- 一键 demo 全部检查通过。
+- 一键 demo 全部检查通过；
+- 标签纸 3x8 网格登记、幂等登记和非法格；
+- 拼版占格顺序、未分配格留白、可打印 HTML；
+- 未确认/过期方案禁止拼版、箱码不属于方案；
+- 空格不足整版退回且不占纸位/箱码；
+- 同一格或箱码不重复分配（含并发单格争用只有一个成功）；
+- 分批回报、原样重报幂等、改报冲突整次拒绝；
+- `blank` 格与箱码立即续用、`damaged` 只释放箱码、`printed` 永久占用。
 
-另外已用真实 Uvicorn HTTP 服务运行 `scripts/smoke_check.py`：14 项端到端检查全部通过，并连续重复运行确认 SQLite 请求连接在线程池下稳定。当前执行环境没有安装 `docker` / `docker compose`，因此 Compose 文件只做了 YAML 解析检查，尚未在该环境实际执行 `docker compose up --build`。
+另外已用真实 Uvicorn HTTP 服务运行 `scripts/smoke_check.py`：25 项端到端检查全部通过。当前执行环境没有安装 `docker` / `docker compose`，因此 Compose 文件只做了 YAML 解析检查，尚未在该环境实际执行 `docker compose up --build`。

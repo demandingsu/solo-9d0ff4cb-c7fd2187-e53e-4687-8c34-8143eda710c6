@@ -79,6 +79,18 @@ def demo_guide() -> dict[str, Any]:
                     "POST /api/plans/{replacement_id}/outbound -> 409 PLAN_EXPIRED",
                 ],
             },
+            {
+                "scenario": "箱签拼版、分批回报和空格续用",
+                "method_sequence": [
+                    "POST /api/plans -> confirm two plans, copy containers[].container_code as box codes",
+                    "POST /api/label-sheets with a sheet_code and optional available_cells (1..24)",
+                    "POST /api/label-layouts with items=[{plan_id, box_codes}] -> copy layout_no and page",
+                    "GET /api/label-layouts/{layout_no}/print -> print the A4 page",
+                    "POST /api/label-layouts/{layout_no}/report with printed/blank/damaged results, in batches",
+                    "Report one cell blank, then POST /api/label-layouts again to reuse that free cell for another plan",
+                    "GET /api/label-sheets/{sheet_code} -> free_cells / occupied_cells confirm the reuse",
+                ],
+            },
         ],
         "one_click_endpoint": "POST /api/demo/run",
     }

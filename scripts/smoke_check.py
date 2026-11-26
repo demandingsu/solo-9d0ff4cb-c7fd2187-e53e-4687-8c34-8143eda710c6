@@ -169,6 +169,114 @@ checks.append((
 status, demo = call("POST", "/api/demo/run")
 checks.append(("demo_run_all_passed", status == 200 and demo["all_passed"] is True))
 
+# --- Box-label imposition -------------------------------------------------
+status, label_plan = call("POST", "/api/plans", {
+    "batches": [
+        {"batch_code": f"SMOKE-LBL-A-{SUFFIX}", "quantity": 125},
+        {"batch_code": f"SMOKE-LBL-B-{SUFFIX}", "quantity": 73},
+    ],
+    "container_capacity": 60,
+    "min_load": 25,
+    "max_load": 50,
+})
+checks.append(("label_plan_created", status == 201 and len(label_plan["containers"]) == 5))
+# Confirm the plan so its box codes may be printed.
+status, confirmed_label_plan = call("POST", f"/api/plans/{label_plan['id']}/confirm")
+checks.append(("label_plan_confirmed", status == 200 and confirmed_label_plan["status"] == "confirmed"))
+label_boxes = [c["container_code"] for c in confirmed_label_plan["containers"]]
+
+sheet_code = f"SMOKE-SHEET-{SUFFIX}"
+status, sheet = call("POST", "/api/label-sheets", {
+    "sheet_code": sheet_code, "available_cells": [2, 5, 7],
+})
+checks.append((
+    "label_sheet_registered",
+    status == 201 and sheet["free_cells"] == [2, 5, 7] and sheet["total_cells"] == 24,
+))
+
+status, layout = call("POST", "/api/label-layouts", {
+    "sheet_code": sheet_code,
+    "items": [{"plan_id": label_plan["id"], "box_codes": label_boxes[:2]}],
+})
+checks.append((
+    "label_layout_imposed",
+    status == 201
+    and [p["cell_no"] for p in layout["placements"]] == [2, 5]
+    and layout["page"][0][0] is None
+    and layout["placement_count"] == 2,
+))
+
+# Over-full request must roll back completely: 1 free cell, 2 boxes.
+status, overflow = call("POST", "/api/label-layouts", {
+    "sheet_code": sheet_code,
+    "items": [{"plan_id": label_plan["id"], "box_codes": label_boxes[2:4]}],
+})
+still = call("GET", f"/api/label-sheets/{sheet_code}")[1]
+checks.append((
+    "label_overflow_rejected_and_unreserved",
+    status == 422
+    and overflow["error"]["code"] == "LABEL_SHEET_CAPACITY_EXCEEDED"
+    and still["free_cells"] == [7]
+    and len(call("GET", f"/api/label-layouts?sheet_code={sheet_code}")[1]) == 1,
+))
+
+status, printed = call("GET", f"/api/label-layouts/{layout['layout_no']}/print", parse_json=False)
+checks.append((
+    "label_printable_html",
+    status == 200 and layout["layout_no"] in printed and label_boxes[0] in printed,
+))
+
+status, reported = call("POST", f"/api/label-layouts/{layout['layout_no']}/report", {
+    "items": [
+        {"cell_no": 2, "box_code": label_boxes[0], "result": "printed"},
+        {"cell_no": 5, "box_code": label_boxes[1], "result": "blank"},
+    ],
+})
+checks.append((
+    "label_batched_report",
+    status == 200
+    and [r["result"] for r in reported["results"]] == ["printed", "blank"]
+    and reported["sheet"]["free_cells"] == [5, 7],
+))
+
+status, again = call("POST", f"/api/label-layouts/{layout['layout_no']}/report", {
+    "items": [{"cell_no": 2, "box_code": label_boxes[0], "result": "printed"}],
+})
+checks.append((
+    "label_idempotent_repeat",
+    status == 200 and again["results"][0]["idempotent"] is True,
+))
+
+status, conflict = call("POST", f"/api/label-layouts/{layout['layout_no']}/report", {
+    "items": [{"cell_no": 5, "box_code": label_boxes[1], "result": "damaged"}],
+})
+checks.append((
+    "label_conflict_rejected",
+    status == 409 and conflict["error"]["code"] == "LABEL_REPORT_CONFLICT",
+))
+
+# Free cell 5 (released by blank) is reusable by a different box code.
+status, reuse = call("POST", "/api/label-layouts", {
+    "sheet_code": sheet_code,
+    "items": [{"plan_id": label_plan["id"], "box_codes": label_boxes[2:3]}],
+})
+checks.append((
+    "label_blank_cell_reused",
+    status == 201 and [p["cell_no"] for p in reuse["placements"]] == [5],
+))
+
+# Damage a cell: cell stays occupied but its box code can be reprinted elsewhere.
+status, damaged = call("POST", f"/api/label-layouts/{reuse['layout_no']}/report", {
+    "items": [{"cell_no": 5, "box_code": label_boxes[2], "result": "damaged"}],
+})
+_, damaged_sheet = call("GET", f"/api/label-sheets/{sheet_code}")
+checks.append((
+    "label_damaged_cell_stays",
+    status == 200
+    and damaged_sheet["occupied_cells"] == [2, 5]
+    and damaged_sheet["free_cells"] == [7],
+))
+
 width = max(len(name) for name, _ in checks)
 for name, passed in checks:
     print(f"{'PASS' if passed else 'FAIL'}  {name.ljust(width)}")

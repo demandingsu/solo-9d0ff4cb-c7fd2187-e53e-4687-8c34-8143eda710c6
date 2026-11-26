@@ -86,10 +86,73 @@ CREATE TABLE IF NOT EXISTS outbound_records (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS label_sheets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sheet_code TEXT NOT NULL UNIQUE,
+    rows INTEGER NOT NULL CHECK (rows > 0),
+    columns INTEGER NOT NULL CHECK (columns > 0),
+    note TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS label_sheet_cells (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sheet_id INTEGER NOT NULL REFERENCES label_sheets(id) ON DELETE CASCADE,
+    cell_no INTEGER NOT NULL CHECK (cell_no > 0),
+    row_no INTEGER NOT NULL CHECK (row_no > 0),
+    col_no INTEGER NOT NULL CHECK (col_no > 0),
+    is_available INTEGER NOT NULL CHECK (is_available IN (0, 1)),
+    UNIQUE (sheet_id, cell_no)
+);
+
+CREATE TABLE IF NOT EXISTS label_layouts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    layout_no TEXT NOT NULL UNIQUE,
+    sheet_id INTEGER NOT NULL REFERENCES label_sheets(id) ON DELETE RESTRICT,
+    sheet_code TEXT NOT NULL,
+    note TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS label_placements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    layout_id INTEGER NOT NULL REFERENCES label_layouts(id) ON DELETE CASCADE,
+    sheet_id INTEGER NOT NULL REFERENCES label_sheets(id) ON DELETE RESTRICT,
+    cell_no INTEGER NOT NULL CHECK (cell_no > 0),
+    plan_id INTEGER NOT NULL REFERENCES packing_plans(id) ON DELETE RESTRICT,
+    batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE RESTRICT,
+    batch_code TEXT NOT NULL,
+    container_id INTEGER NOT NULL REFERENCES containers(id) ON DELETE RESTRICT,
+    box_code TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (
+        status IN ('reserved', 'printed', 'blank', 'damaged')
+    ),
+    reprinted INTEGER NOT NULL DEFAULT 0 CHECK (reprinted IN (0, 1)),
+    created_at TEXT NOT NULL,
+    reported_at TEXT,
+    UNIQUE (layout_id, cell_no)
+);
+
+-- A physical cell is occupied by at most one layout while its result is
+-- reserved, printed or damaged. A cell confirmed blank is released for reuse.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_label_cell_active
+    ON label_placements(sheet_id, cell_no)
+    WHERE status IN ('reserved', 'printed', 'damaged');
+
+-- A box code can belong to at most one active layout. Printed and reserved
+-- codes stay occupied; blank and damaged results release the code for reprint.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_label_box_active
+    ON label_placements(box_code)
+    WHERE status IN ('reserved', 'printed');
+
 CREATE INDEX IF NOT EXISTS idx_plan_batches_batch ON plan_batches(batch_id);
 CREATE INDEX IF NOT EXISTS idx_containers_plan ON containers(plan_id);
 CREATE INDEX IF NOT EXISTS idx_allocations_plan ON allocations(plan_id);
 CREATE INDEX IF NOT EXISTS idx_allocations_container ON allocations(container_id);
+CREATE INDEX IF NOT EXISTS idx_label_layouts_sheet ON label_layouts(sheet_id);
+CREATE INDEX IF NOT EXISTS idx_label_placements_layout ON label_placements(layout_id);
+CREATE INDEX IF NOT EXISTS idx_label_placements_sheet ON label_placements(sheet_id);
+CREATE INDEX IF NOT EXISTS idx_label_placements_plan ON label_placements(plan_id);
 """
 
 

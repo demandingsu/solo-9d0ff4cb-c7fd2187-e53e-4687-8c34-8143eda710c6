@@ -73,3 +73,60 @@ BATCH_PATCH_EXAMPLES = {
         "value": {"quantity": 125},
     },
 }
+
+
+LABEL_SHEET_EXAMPLES = {
+    "full_sheet": {
+        "summary": "整张 A4 标签纸（3 列 x 8 行，24 格全部可用）",
+        "value": {"sheet_code": "A4-3x8-FULL", "available_cells": list(range(1, 25))},
+    },
+    "remaining_cells": {
+        "summary": "只剩 2、5、7 格的半张纸",
+        "value": {"sheet_code": "A4-3x8-LEFT-2-5-7", "available_cells": [2, 5, 7]},
+    },
+    "default_geometry": {
+        "summary": "按纸号登记，缺省使用全部 24 格",
+        "value": {"sheet_code": "A4-3x8-DEFAULT"},
+    },
+}
+
+LABEL_IMPOSE_EXAMPLES = {
+    "two_plans_one_sheet": {
+        "summary": "两个已确认方案拼到同一张纸",
+        "description": "按 items 顺序占入空闲格；图案见响应 page，未分配格为 null。",
+        "value": {
+            "sheet_code": "A4-3x8-FULL",
+            "items": [
+                {"plan_id": 1, "box_codes": ["BOX-P1-001", "BOX-P1-002"]},
+                {"plan_id": 2, "box_codes": ["BOX-P2-001"]},
+            ],
+        },
+    },
+    "reuse_blank_cells": {
+        "summary": "确认空白后，把空格与新箱码拼到同一张纸",
+        "value": {
+            "sheet_code": "A4-3x8-LEFT-2-5-7",
+            "items": [{"plan_id": 3, "box_codes": ["BOX-P3-001"]}],
+        },
+    },
+}
+
+LABEL_REPORT_EXAMPLES = {
+    "printed_batch": {
+        "summary": "分批回报：1、2 格已印",
+        "value": {
+            "items": [
+                {"cell_no": 1, "box_code": "BOX-P1-001", "result": "printed"},
+                {"cell_no": 2, "box_code": "BOX-P1-002", "result": "printed"},
+            ]
+        },
+    },
+    "blank_release": {
+        "summary": "回报第 3 格为空白，释放该格与箱码",
+        "value": {"items": [{"cell_no": 3, "box_code": "BOX-P2-001", "result": "blank"}]},
+    },
+    "damaged_release_code": {
+        "summary": "回报某格损坏：格仍占用，箱码可重排",
+        "value": {"items": [{"cell_no": 5, "box_code": "BOX-P2-002", "result": "damaged"}]},
+    },
+}
